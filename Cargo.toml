@@ -1,0 +1,19 @@
+[package]
+name = "unsized_enum"
+version = "0.0.1"
+authors = ["Jim Peters <jim@uazu.net>"]
+edition = "2018"
+
+description = "Unsized enum implementation"
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+repository = "https://github.com/uazu/unsized_enum"
+documentation = "https://docs.rs/unsized_enum"
+
+keywords = [ "unsized", "enum", "dst", "trait-object" ]
+categories = [ "data-structures" ]
+
+[badges]
+maintenance = { status = "experimental" }
+
