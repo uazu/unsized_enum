@@ -92,6 +92,7 @@
 //! [`UnsizedEnum`]: struct.UnsizedEnum.html
 
 use std::alloc::Layout;
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::mem;
 use std::mem::ManuallyDrop;
@@ -239,15 +240,13 @@ impl<B, V0: ?Sized, V1> UnsizedEnum<B, V0, V1> {
     /// Change the value stored in the enum to the provided `V0`
     /// value, dropping the previous value (of whichever variant).
     #[inline]
-    pub fn set_v0(&mut self, v0: &Forget<V0>) {
+    pub fn set_v0(&mut self, v0: &Move<V0>) {
         // Safe because the value is only temporarily in an
-        // invalid/dropped state.  The Forget type lets us do a "move"
-        // operation by copying data out of it, without it being
-        // dropped twice, since the Forget type will never drop it.
-        // Since the method API doesn't prevent the caller providing a
-        // different underlying type, it's necessary to check the
-        // vtable first.
-        let p = v0.get_ref();
+        // invalid/dropped state.  The `Move` type lets us do a "move"
+        // operation for an unsized value.  Since the method API
+        // doesn't prevent the caller providing a different underlying
+        // type, it's necessary to check the vtable first.
+        let p = v0.get_ref().expect("Already moved value passed to set_v0");
         assert_eq!(
             vtable_of(p),
             vtable_of(self),
@@ -325,29 +324,53 @@ pub enum EnumRef<'a, V0: ?Sized, V1> {
     V1(&'a mut V1),
 }
 
-/// A type that guarantees not to drop the enclosed value
-///
-/// This is used to allow a 'move' to be executed by copying data
-/// directly in unsafe code.
-pub struct Forget<T: ?Sized>(ManuallyDrop<T>);
+/// A type that allows an unsized value to be moved
+pub struct Move<T: ?Sized> {
+    moved: Cell<bool>,
+    value: ManuallyDrop<T>,
+}
 
-impl<T> Forget<T> {
+impl<T> Move<T> {
     #[inline]
     pub fn new(val: T) -> Self {
-        Self(ManuallyDrop::new(val))
+        Self {
+            moved: Cell::new(false),
+            value: ManuallyDrop::new(val),
+        }
     }
 }
 
-impl<T: ?Sized> Forget<T> {
-    /// Get a reference to the contained value
-    pub fn get_ref(&self) -> &T {
-        &(*self.0)
+impl<T: ?Sized> Move<T> {
+    /// Get a reference to the contained value and mark it as moved if
+    /// it has not yet been moved, otherwise return `None`.  If the
+    /// caller does not move the value out (through copying in unsafe
+    /// code), then the value will leak (like `mem::forget`).  However
+    /// leaking memory is safe, so this interface doesn't need to be
+    /// marked unsafe.
+    #[inline]
+    pub fn get_ref(&self) -> Option<&T> {
+        if self.moved.get() {
+            None
+        } else {
+            self.moved.set(true);
+            Some(&*self.value)
+        }
+    }
+}
+
+impl<T: ?Sized> Drop for Move<T> {
+    fn drop(&mut self) {
+        if !self.moved.get() {
+            // Safe because we only drop it if it hasn't already been
+            // moved
+            unsafe { ManuallyDrop::drop(&mut self.value) };
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EnumRef, Forget, UnsizedEnum};
+    use super::{EnumRef, Move, UnsizedEnum};
     struct Base(usize);
     struct A(u16);
 
@@ -389,11 +412,11 @@ mod tests {
         assert_eq!(calc_sum(&mut e), 3.0);
         e.set_v1(A(54321));
         assert_eq!(calc_sum(&mut e), 54321.0);
-        e.set_v0(&Forget::new(B { a: 3.0, b: 4.0 }));
+        e.set_v0(&Move::new(B { a: 3.0, b: 4.0 }));
         assert_eq!(calc_sum(&mut e), 7.0);
         e = UnsizedEnum::<Base, C, A>::new_v1(Base(654321), A(12345));
         assert_eq!(calc_sum(&mut e), 12345.0);
-        e.set_v0(&Forget::new(C { a: 3, b: 4, c: 5 }));
+        e.set_v0(&Move::new(C { a: 3, b: 4, c: 5 }));
         assert_eq!(calc_sum(&mut e), 12.0);
         e.set_v1(A(13542));
         assert_eq!(calc_sum(&mut e), 13542.0);
@@ -405,7 +428,7 @@ mod tests {
         let mut e: Box<UnsizedEnum<Base, dyn Sum, A>>;
         e = UnsizedEnum::<Base, C, A>::new_v1(Base(654321), A(12345));
         // Can't write a `B` to a `C` instance
-        e.set_v0(&Forget::new(B { a: 3.0, b: 4.0 }));
+        e.set_v0(&Move::new(B { a: 3.0, b: 4.0 }));
     }
 
     #[test]
@@ -414,7 +437,7 @@ mod tests {
         let mut e: Box<UnsizedEnum<Base, dyn Sum, A>>;
         e = UnsizedEnum::new_v0(Base(654321), C { a: 3, b: 4, c: 5 });
         // Can't write a `B` to a `C` instance
-        e.set_v0(&Forget::new(B { a: 3.0, b: 4.0 }));
+        e.set_v0(&Move::new(B { a: 3.0, b: 4.0 }));
     }
 
     #[test]
@@ -423,6 +446,6 @@ mod tests {
         // fat pointers involved
         let mut e = UnsizedEnum::new_v0(Base(654321), B { a: 1.0, b: 2.0 });
         e.set_v1(A(54321));
-        e.set_v0(&Forget::new(B { a: 3.0, b: 4.0 }));
+        e.set_v0(&Move::new(B { a: 3.0, b: 4.0 }));
     }
 }
